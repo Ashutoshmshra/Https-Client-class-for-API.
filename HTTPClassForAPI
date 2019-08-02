@@ -1,0 +1,374 @@
+import Foundation
+import UIKit
+import Alamofire
+import SVProgressHUD
+//import SwiftyJSON
+
+typealias CompletionBlock = (Dictionary<String, Any>?,Int, Error?) -> (Void)
+typealias ProgressBlock = (Float) -> (Void)
+
+class HTTPClient : NSObject{
+
+    fileprivate let timeIntervalForRequest = 5*60.0
+    private override init() {
+        super.init()
+        
+        
+    }
+    static var shared :HTTPClient? {
+       
+        if (NetworkReachabilityManager()?.isReachable)! == true { //------- check internet connection
+            return HTTPClient()
+        }
+        
+        HTTPClient.showReachabilityAlert()
+        return nil
+  
+    }
+    
+    private func updateParamsWithHeaderFields(params: [String: Any]?) -> [String: Any]?{
+        if var params = params  {
+            params["device_id"] = UIDevice.current.identifierForVendor?.uuidString ?? "123"
+            params["device_type"] = "ios"
+            params["app_version"] = "\(AppConstants.appVersion)"
+            return params
+        }
+        
+        let params:[String:Any] = ["device_id":UIDevice.current.identifierForVendor?.uuidString ?? "123",
+                                   "device_type":"iOS",
+                                   "app_version":"\(AppConstants.appVersion)"]
+        return params
+    }
+    
+    func setHTTPRequest(withAPIUrl url: String, withHttpMethod method: HTTPMethod, withParameters params: [String: Any]?) -> URLRequest? {
+        
+        var url = url//------ to update the url for get request
+        
+        let params = self.updateParamsWithHeaderFields(params: params)//---------- to fix header fetch issue at server side, remove it when fix
+        
+        
+        let headers: [String:String] = setAllAuthenticationKeys()
+        var request: URLRequest? = nil
+        
+        if method == .get { //--------- update the parameters in query string in case of get request
+            if let params = params{
+                var urlComponents = URLComponents.init(string: url)
+                var queryItems = [URLQueryItem]()
+                for (key,value) in params{
+                    queryItems.append(URLQueryItem(name: key, value: "\(value)"))
+                }
+                urlComponents?.queryItems = queryItems
+                if let urlString = urlComponents?.string{
+                    url = urlString
+                }
+            }
+        }
+        
+        do {
+            request = try URLRequest.init(url: url, method: method, headers: headers)
+            request?.timeoutInterval = timeIntervalForRequest
+            
+            if method != .get{
+                if params != nil {
+                    request?.httpBody = try! JSONSerialization.data(withJSONObject: params!, options: [])
+                }
+            }
+            
+        }
+        catch {
+            print("****** exception in Http Request ********")
+        }
+        
+        return request
+    }
+    
+    
+    func setAllAuthenticationKeys() -> [String:String] {
+        //        var headers: [String:String] = [
+        //            "Authorization": "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        //            "Content-Type": "application/x-www-form-urlencoded"
+        //        ]
+        //        let nsObject: AnyObject? = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as AnyObject
+        //        let version = AppConstants.appVersion nsObject as! String
+        //let version = AppConstants.appVersion
+        
+        var headers: [String:String] = [
+            
+            "Content-Type": "application/json",
+            "Accept" : "application/json",
+            "device_type": "ios",
+            "device_id": UIDevice.current.identifierForVendor!.uuidString,
+            "app_version":"v\(AppConstants.appVersion)",
+            ]
+        
+        if let token = AppConstants.GetUserDefaults(key: AppConstants.ACCESSTOKEN) as? String{
+            headers["token"] = token
+            debugLog("-------------- TOKEN: \(token) ----------- \n")
+        }
+        return headers
+    }
+    
+    
+    
+    func getRequest(baseUrl:String,showLoader: Bool = true, params:[String:Any]? = nil, completionBlock:@escaping CompletionBlock ){
+        let request = setHTTPRequest(withAPIUrl: baseUrl, withHttpMethod: .get, withParameters: params)
+        if showLoader{
+            AppConstants.showProgress()
+        }
+        
+        Alamofire.request(request! as URLRequestConvertible).responseJSON { (responseData: DataResponse<Any>) in
+            self.printResponse(responseData: responseData)//----- to get a json convertable response log
+            
+            if showLoader{
+                AppConstants.endProgress()
+            }
+            if self.checkUserSession(statusCode: responseData.response?.statusCode) {return}//------ check for user session
+            
+            switch (responseData.result){
+            case .success(_):
+                if let response = responseData.result.value{
+                    completionBlock(responseData.result.value as? [String:Any], (responseData.response?.statusCode) ?? 0, responseData.result.error)
+                }
+                break
+                
+            case .failure(let error):
+                if ( responseData.result.value == nil){
+                    
+                    if error._code == NSURLErrorNotConnectedToInternet || error._code == NSURLErrorTimedOut{
+                        if(error._code == -1005){
+                        }
+                        else{
+                            completionBlock(nil ,600 ,responseData.result.error)
+                        }
+                    }
+                    else if responseData.response?.statusCode == 500{
+                        completionBlock(nil,(responseData.response?.statusCode) ?? 0, "Unable to connect to server. Please try again after sometime." as? Error)
+                    }
+                    else{
+                        completionBlock(nil,(responseData.response?.statusCode) ?? 0,responseData.result.error)
+                    }
+                }
+                else{
+                    completionBlock(responseData.result.value as? [String:Any],
+                                    (responseData.response?.statusCode) ?? 0 , responseData.result.error)
+                }
+                break
+            }
+        }
+    }
+    
+
+    
+    func PostHTTPRequest(showLoader: Bool = true,baseUrl:String, params:[String:Any], completionBlock:@escaping CompletionBlock) -> Void {
+        // if !checkInternetConnection(){ return} //----- Connection check
+        
+        let request = setHTTPRequest(withAPIUrl: baseUrl, withHttpMethod: .post, withParameters: params)
+        if showLoader{
+            AppConstants.showProgress()
+        }
+        
+        Alamofire.request(request! as URLRequestConvertible).responseJSON { (responseData: DataResponse<Any>) in
+            self.printResponse(responseData: responseData)//----- to get a json convertable response log
+            
+            if showLoader{
+                AppConstants.endProgress()
+            }
+            if self.checkUserSession(statusCode: responseData.response?.statusCode) {return}//------ check for user session
+            switch (responseData.result){
+                
+            case .success(_):
+                
+                if (responseData.response?.allHeaderFields) != nil{
+                    if let accesstoken = responseData.response?.allHeaderFields["token"] as? String{
+                        if accesstoken != ""{
+                            AppConstants.SaveUserDefaults(value: accesstoken, key: AppConstants.ACCESSTOKEN)
+                            AppConstants.SaveUserDefaults(value: true, key: AppConstants.ISLOGIN)
+                        }
+                        
+                    }
+                    
+                    
+                }
+                
+                completionBlock(responseData.result.value as? [String : Any] ,(responseData.response?.statusCode) ?? 0,responseData.result.error)
+                
+                break
+            case .failure(let error):
+                
+                if (responseData.result.value == nil) {
+                    
+                    if error._code == NSURLErrorNotConnectedToInternet{
+                        completionBlock(nil ,600,responseData.result.error)
+                        
+                    } else if responseData.response?.statusCode == 500 {
+                        completionBlock(nil ,500,"Unable to connect to server. Please try again after sometime." as? Error)
+                        
+                    }
+                    else{
+                        completionBlock(nil ,(responseData.response?.statusCode) ?? 0,responseData.result.error)
+                    }
+                }
+                else{
+                    completionBlock(responseData.result.value as? [String : Any] ,(responseData.response?.statusCode) ?? 0,responseData.result.error)
+                }
+                break
+            }
+        }
+    }
+    
+    //MARK: - Helpers Method
+    func checkUserSession(statusCode: Int?) -> Bool{
+        if let statusCode = statusCode, statusCode == 401{
+            AppConstants.SaveUserDefaults(value: false, key: AppConstants.ISLOGIN)
+            HYCartModel.shared = HYCartModel() //------- reset cart model
+            
+            AppInitializer.shared.moveToLandingScreen()
+            AppDelegate.shared.window?.rootViewController?.showSingleBtnAlertWith(title: AlertText.AlertTitleText, subTitle: AppMessages.userSessionExpiredAlert, centerBtnAction: {})
+            return true
+        }
+        return false
+    }
+    
+    func printResponse(responseData: DataResponse<Any>){
+        var requstURL = ""
+        if let request = responseData.request,
+            let url = request.url{
+            requstURL = "\(url)"
+        }
+        var responseDataStr = NSString()
+        if let data = responseData.data,
+            let responseString = NSString.init(data: data, encoding: 4){
+            responseDataStr = responseString
+        }
+        
+        debugLog(NSString.init(format: "\n----- START RESPONSE ------\n\nURL: %@\nRESPONSE: %@\n\n----- END RESPONSE ------\n",requstURL,responseDataStr))
+        
+    }
+    
+    static func showReachabilityAlert(){
+        /*
+        if !NetworkManager.isConnectedToInternet(){
+            PushManager.shared.currentViewContoller()?.showSingleBtnAlertWith(title: AlertText.AlertTitleText, subTitle: "Please check your connection and try again.", centerBtnTitle: "OK"){
+                DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 0.8, execute: {
+                    showReachabilityAlert()
+                })
+            }
+        }
+        return
+ */
+        
+        var topmostVC = AppDelegate.shared.window?.topMostWindowController()
+        
+        if let rootVC = AppDelegate.shared.window?.rootViewController as? HYSlideMenuController,
+            let navVC = rootVC.mainViewController as? UINavigationController{
+            topmostVC = navVC.visibleViewController
+            
+        }else if let rootVC = AppDelegate.shared.window?.rootViewController {
+            topmostVC = rootVC
+        }
+        
+        topmostVC?.showSingleBtnAlertWith(title: AlertText.AlertTitleText, subTitle: AlertText.InternetReachability, centerBtnAction: {})
+        
+    }
+    
+    //MARK:- Multipart postService Call
+    func multiPartPostRequest(baseUrl:String,imageName : String?,imageData:Data?,params:[String:Any]?,completionBlock:@escaping CompletionBlock )->Void{
+        
+        
+        var request = getRequest(withAPIUrl: baseUrl, withHTTPMethod: .post, withParameters: params)
+        request?.timeoutInterval = 180
+        AppConstants.showProgress()
+
+        Alamofire.upload(multipartFormData: { multipartFormData in
+            
+            // Adding ImageData
+            if imageData != nil {
+                multipartFormData.append(imageData!, withName: imageName ?? "image_path", fileName: "image.jpg", mimeType: "image/jpeg")
+                //multipartFormData.append(imageData!, withName: "image_path", fileName: "image.jpg", mimeType: "image/jpeg")
+            }
+            
+            
+            
+            // Adding Param Dictionary
+            if params != nil {
+                for (key, value) in params!
+                {
+                    if value is String || value is Int {
+                        multipartFormData.append("\(String(describing: value))".data(using: .utf8)!, withName: key)
+                    }
+                }
+            }
+        }, with: request! as URLRequestConvertible) { encodingResult in
+            
+            switch encodingResult {
+                
+            case .success(let upload, _, _):
+                upload.uploadProgress(closure: { (Progress) in
+                    //  print("Upload Progress: \(Progress.fractionCompleted)")
+                })
+                
+                upload.responseJSON { responseData in
+                    
+                    AppConstants.endProgress()
+                    if self.checkUserSession(statusCode: responseData.response?.statusCode) {return}//------ check for user session
+                    
+                    switch responseData.result {
+                    case .success:
+                        if (responseData.response?.allHeaderFields) != nil{
+                            if let accesstoken = responseData.response?.allHeaderFields["token"] as? String{
+                                if accesstoken != ""{
+                                    AppConstants.SaveUserDefaults(value: accesstoken, key: AppConstants.ACCESSTOKEN)
+                                    AppConstants.SaveUserDefaults(value: true, key: AppConstants.ISLOGIN)
+                                }
+                            }
+                        }
+                        
+                        completionBlock(responseData.result.value as? [String : Any] ,(responseData.response?.statusCode) ?? 0,responseData.result.error)
+                        
+                    case .failure( _):
+                        if (responseData.result.value == nil) {
+                            completionBlock(nil ,(responseData.response?.statusCode) ?? 0,responseData.result.error)
+                        }
+                        else {
+                            completionBlock(responseData.result.value as? [String : Any], (responseData.response?.statusCode) ?? 0,responseData.result.error)
+                        }
+                    }
+                }
+                break
+                
+            case .failure(let encodingError):
+                AppConstants.endProgress()
+                completionBlock(nil ,0,encodingError)
+            }
+        }
+    }
+    
+    func getRequest(withAPIUrl url:String,withHTTPMethod method:HTTPMethod,withParameters params:[String:Any]? )-> URLRequest?{
+        
+        
+        let headers:[String:String] = setAllAuthenticationKeys()
+        var request:URLRequest? = nil
+        do{
+            request = try URLRequest.init(url: url, method: method, headers: headers)
+            request?.timeoutInterval = 20
+            if params != nil {
+                request?.httpBody = try! JSONSerialization.data(withJSONObject: params, options: [])
+                
+            }
+        }
+            
+        catch{
+            print("******** exception in Http Request **********")
+            
+        }
+        
+        return request
+    }
+    
+    
+    
+}
+
+
+
+
